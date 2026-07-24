@@ -1,0 +1,39 @@
+{
+  "hotkey": "f9",
+  "model_size": "base.en",
+  "compute_type": "int8",
+  "device": "cpu",
+  "sample_rate": 16000,
+  "injection_mode": "auto",
+  "restore_clipboard": true,
+  "beep_feedback": true,
+  "mute_audio_while_recording": true,
+  "min_record_seconds": 0.3,
+  "smart_formatting": true,
+  "voice_commands": {
+    "new paragraph": "\n\n",
+    "new line": "\n",
+    "exclamation point": "!",
+    "exclamation mark": "!",
+    "question mark": "?",
+    "open paren": "(",
+    "open parenthesis": "(",
+    "close paren": ")",
+    "close parenthesis": ")",
+    "open quote": "\"",
+    "close quote": "\"",
+    "colon": ":",
+    "semicolon": ";",
+    "dash": " - ",
+    "ellipsis": "...",
+    "smiley face": ":)"
+  },
+  "terminal_processes": [
+    "windowsterminal.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "cmd.exe",
+    "conhost.exe",
+    "wt.exe"
+  ]
+}

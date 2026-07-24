@@ -1,0 +1,24 @@
+# Local speech-to-text
+faster-whisper>=1.2.1
+
+# Audio capture
+sounddevice>=0.5.5
+numpy>=2.0
+
+# Global hotkey + text injection
+keyboard>=0.13.5
+pyperclip>=1.11.0
+
+# Windows APIs (foreground window detection, single-instance mutex, beeps)
+pywin32>=310
+
+# System tray icon
+pystray>=0.19
+pillow>=10.0
+
+# Mute speakers while recording (Windows Core Audio)
+pycaw>=20240210
+comtypes>=1.4
+
+# Build tooling — venv ships an old setuptools with known CVEs
+setuptools>=78.1.1
