@@ -161,3 +161,18 @@ LinkedIn is the best way to reach me.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+### Third-party licenses
+
+This project's own code is MIT. Dependencies keep their own licenses, and are
+installed from PyPI rather than bundled:
+
+- **MIT** — faster-whisper, CTranslate2, keyboard, onnxruntime
+- **BSD / PSF** — numpy, pyperclip, pywin32
+- **Apache-2.0** — tokenizers, huggingface_hub
+- **LGPL-3.0** — [pystray](https://github.com/moses-palmer/pystray) (system tray
+  icon). Used as an unmodified library installed via pip, so it can be replaced
+  or upgraded independently.
+
+The Whisper models are released by OpenAI under MIT; the CTranslate2 conversions
+are distributed by SYSTRAN.
