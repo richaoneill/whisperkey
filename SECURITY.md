@@ -13,11 +13,16 @@ it does and doesn't do.
 - Transcribes audio **in-process, on your machine**, using faster-whisper.
 - Types the transcribed text into the focused window, either by clipboard paste
   or by simulated Unicode keystrokes.
+- For read-aloud, sends `Ctrl+C` to copy the current selection, synthesizes it
+  locally, plays it, and restores your previous clipboard contents. The selected
+  text stays in memory only.
 
 ## What the app does not do
 
-- **No keystroke logging.** Key events other than the hotkey are never
+- **No keystroke logging.** Key events other than the hotkeys are never
   inspected, stored, or transmitted.
+- **No clipboard monitoring.** The clipboard is touched only in direct response
+  to a hotkey press, and its prior contents are restored.
 - **No network calls at runtime.** The only download is the Whisper model, from
   Hugging Face, on first launch. After that it runs fully offline.
 - **No audio written to disk.** Audio lives in memory and is discarded after

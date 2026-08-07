@@ -43,6 +43,12 @@ Write-Host "Installing dependencies (this can take a few minutes)..."
 Write-Host ""
 Write-Host "Setup complete." -ForegroundColor Green
 Write-Host ""
+Write-Host "Read-aloud (F10) works now using the built-in Windows voices."
+Write-Host "For a much more natural neural voice, opt in to Piper:" -ForegroundColor Cyan
+Write-Host "  .venv\Scripts\python.exe -m pip install piper-tts"
+Write-Host "  .venv\Scripts\python.exe -m piper.download_voices en_US-lessac-medium --download-dir models"
+Write-Host "  (piper-tts is GPL-3.0-or-later - see the README license notes)"
+Write-Host ""
 Write-Host "Start it:            .\run.bat"
 Write-Host "Run at login:        powershell -ExecutionPolicy Bypass -File install-startup.ps1"
 Write-Host ""

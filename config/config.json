@@ -8,6 +8,12 @@
   "restore_clipboard": true,
   "beep_feedback": true,
   "mute_audio_while_recording": true,
+  "tts_enabled": true,
+  "tts_hotkey": "f10",
+  "tts_engine": "auto",
+  "tts_model": "models/en_US-lessac-medium.onnx",
+  "tts_speed": 1.0,
+  "tts_max_chars": 20000,
   "min_record_seconds": 0.3,
   "smart_formatting": true,
   "voice_commands": {

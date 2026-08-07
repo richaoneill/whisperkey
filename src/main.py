@@ -100,6 +100,7 @@ _fault_file = None
 
 IDLE_COLOR = (60, 130, 246, 255)   # blue
 REC_COLOR = (220, 40, 40, 255)     # red
+SPEAK_COLOR = (34, 197, 94, 255)   # green — reading selection aloud
 
 
 def load_config():
@@ -146,12 +147,15 @@ def make_icon_image(color):
 _ICON_CACHE = {}
 
 
-def get_icon_image(recording):
-    """Cached icons — these were being redrawn on every keypress."""
-    key = "rec" if recording else "idle"
-    if key not in _ICON_CACHE:
-        _ICON_CACHE[key] = make_icon_image(REC_COLOR if recording else IDLE_COLOR)
-    return _ICON_CACHE[key]
+def get_icon_image(state):
+    """Cached icons — these were being redrawn on every keypress.
+
+    state: "idle" (blue), "rec" (red, dictating), "speak" (green, reading aloud)
+    """
+    if state not in _ICON_CACHE:
+        color = {"rec": REC_COLOR, "speak": SPEAK_COLOR}.get(state, IDLE_COLOR)
+        _ICON_CACHE[state] = make_icon_image(color)
+    return _ICON_CACHE[state]
 
 
 class Recorder:
@@ -247,27 +251,70 @@ class App:
             except Exception:
                 log("could not init audio muter:\n" + traceback.format_exc())
                 self.muter = None
+
+        # Text-to-speech (read selection aloud). Optional: if the voice model
+        # isn't downloaded, dictation still works and TTS just stays off.
+        self.speaker = None
+        self._tts_requested = threading.Event()
+        if cfg.get("tts_enabled", True):
+            try:
+                from tts import Speaker
+
+                model = cfg.get("tts_model", "models/en_US-lessac-medium.onnx")
+                if not os.path.isabs(model):
+                    model = os.path.join(os.path.dirname(__file__), "..", model)
+                # Always constructed: without a Piper model it falls back to the
+                # built-in Windows voices, so read-aloud works out of the box.
+                self.speaker = Speaker(
+                    model,
+                    cfg.get("tts_speed", 1.0),
+                    log,
+                    cfg.get("tts_engine", "auto"),
+                )
+            except Exception:
+                log("tts init failed:\n" + traceback.format_exc())
+                self.speaker = None
+
         self.icon = pystray.Icon(
             "whisperkey",
             make_icon_image(IDLE_COLOR),
             "WhisperKey",
             menu=pystray.Menu(
-                pystray.MenuItem(lambda i: f"Hotkey: {self.cfg['hotkey']}", None, enabled=False),
+                pystray.MenuItem(lambda i: f"Dictate: {self.cfg['hotkey']}", None, enabled=False),
+                pystray.MenuItem(
+                    lambda i: (
+                        f"Read aloud: {self.cfg.get('tts_hotkey', 'f10')}"
+                        f" ({self.speaker.engine})"
+                        if self.speaker else "Read aloud: off"
+                    ),
+                    None,
+                    enabled=False,
+                ),
                 pystray.MenuItem(lambda i: f"Model: {self.cfg['model_size']}", None, enabled=False),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Quit", self.on_quit),
             ),
         )
 
+    def set_icon_state(self, state):
+        self.icon.icon = get_icon_image(state)
+
     def set_recording_icon(self, recording):
-        self.icon.icon = get_icon_image(recording)
+        self.set_icon_state("rec" if recording else "idle")
 
     def on_quit(self, icon, item):
         self.stop_event.set()
         self._state_changed.set()  # wake the worker so it can exit
+        self._tts_requested.set()
+        if self.speaker:
+            self.speaker.stop()
         self.icon.stop()
 
     def _on_press(self):
+        # Dictating interrupts reading — you can't talk over it anyway, and the
+        # speakers are about to be muted.
+        if self.speaker and self.speaker.speaking:
+            self.speaker.stop()
         # Ding first (so it's audible), then mute output, then start recording.
         beep(880, 80, self.cfg["beep_feedback"])
         if self.muter:
@@ -342,6 +389,56 @@ class App:
             log("hook install failed, falling back to polling:\n" + traceback.format_exc())
             return False
 
+    def install_tts_hook(self):
+        """Read-aloud hotkey: tap to read the selection, tap again to stop."""
+        if not self.speaker:
+            return False
+        key = self.cfg.get("tts_hotkey", "f10")
+        if "+" in key:
+            log(f"tts hotkey '{key}' is a combo; only single keys are supported")
+            return False
+
+        def on_tts(_e):
+            # Stopping is instant and safe to do from a hook (sets a flag and
+            # calls sd.stop). Starting is slow -- clipboard round-trip plus
+            # synthesis -- so the worker thread handles that.
+            if self.speaker.speaking:
+                self.speaker.stop()
+            else:
+                self._tts_requested.set()
+
+        try:
+            keyboard.on_press_key(key, on_tts)
+            log(f"tts hotkey '{key}' installed (tap to read, tap again to stop)")
+            return True
+        except Exception:
+            log("tts hook install failed:\n" + traceback.format_exc())
+            return False
+
+    def tts_worker(self):
+        """Handle read-aloud requests off the keyboard-hook thread."""
+        from tts import get_selected_text
+
+        while not self.stop_event.is_set():
+            if not self._tts_requested.wait(timeout=0.5):
+                continue
+            self._tts_requested.clear()
+            if self.stop_event.is_set():
+                break
+            try:
+                text = get_selected_text()
+                if not text:
+                    # Low tone: nothing was selected.
+                    beep(300, 120, self.cfg.get("beep_feedback", True))
+                    log("tts: nothing selected")
+                    continue
+                self.set_icon_state("speak")
+                self.speaker.speak(text, self.cfg.get("tts_max_chars", 20000))
+            except Exception:
+                log("tts worker error:\n" + traceback.format_exc())
+            finally:
+                self.set_icon_state("idle")
+
     def worker(self):
         """React to hotkey transitions. Blocks when idle, so ~0% CPU at rest."""
         if self._hooked:
@@ -383,18 +480,22 @@ class App:
 
     def run(self):
         self.install_hooks()
-        t = threading.Thread(target=self.worker, daemon=True)
-        t.start()
+        self.install_tts_hook()
+        threading.Thread(target=self.worker, daemon=True).start()
+        if self.speaker:
+            threading.Thread(target=self.tts_worker, daemon=True).start()
         try:
             self.icon.run()  # blocks on the main thread until Quit
         finally:
             self.stop_event.set()
             self._state_changed.set()
-            if self._hooked:
-                try:
-                    keyboard.unhook_all()
-                except Exception:
-                    pass
+            self._tts_requested.set()  # wake the tts worker so it can exit
+            if self.speaker:
+                self.speaker.stop()
+            try:
+                keyboard.unhook_all()
+            except Exception:
+                pass
 
 
 def main():

@@ -1,19 +1,23 @@
 # WhisperKey
 
-Local, offline push-to-talk dictation for Windows. Hold a key, speak, release —
-your words are transcribed on-device and typed into whatever field has focus.
+Local, offline **voice in and voice out** for Windows. Hold a key to dictate into
+any app; tap another to have your selected text read back to you.
 
-A free, private alternative to paid dictation apps. **No cloud, no account, no
-subscription.** Audio never leaves your machine.
+A free, private alternative to paid dictation and read-aloud apps. **No cloud, no
+account, no subscription.** Audio never leaves your machine.
 
 ```
-      [hold F9]  ->  speak  ->  [release]  ->  text appears where you're typing
+  Dictate    [hold F9]  ->  speak       ->  [release]  ->  text appears where you type
+  Read aloud [select text]  ->  [tap F10]  ->  it reads it back  ->  [tap F10] to stop
 ```
 
 ## Features
 
 - **Fully offline** — [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
-  runs locally on CPU. Works on a plane.
+  for speech-to-text and [Piper](https://github.com/rhasspy/piper) for
+  text-to-speech, both running locally on CPU. Works on a plane.
+- **Read anything aloud** — select text in any app and tap F10. Uses a neural
+  voice, not the robotic built-in Windows one. Tap again to stop.
 - **Types into any app** — browsers, editors, Office, chat.
 - **Terminal-aware** — PowerShell and Windows Terminal often ignore programmatic
   paste, so text is sent there as Unicode keystrokes instead. Everywhere else
@@ -53,17 +57,53 @@ Start it:
 .\run.bat
 ```
 
-**Hold `F9`**, speak, release. A high beep means recording started, a low beep
-means it stopped. Text lands in the focused field.
+**Dictate:** hold `F9`, speak, release. A high beep means recording started, a
+low beep means it stopped. Text lands in the focused field.
 
-To launch automatically at login (runs hidden in the tray):
+**Read aloud:** select text anywhere, tap `F10`. Tap `F10` again to stop. A low
+tone means nothing was selected. Starting a dictation also stops playback.
+
+> **Why a hotkey and not a right-click menu?** Windows has no API for adding an
+> item to every application's text context menu — each app draws its own. A
+> global hotkey is the only mechanism that genuinely works everywhere, including
+> terminals.
+
+### Optional: a better read-aloud voice
+
+Out of the box, read-aloud uses the built-in Windows voices — instant, no
+download, but robotic. For a markedly more natural neural voice, opt in to
+[Piper](https://github.com/rhasspy/piper):
+
+```powershell
+.venv\Scripts\python.exe -m pip install piper-tts
+.venv\Scripts\python.exe -m piper.download_voices en_US-lessac-medium --download-dir models
+```
+
+Restart the app and it switches automatically. **Note:** `piper-tts` is
+GPL-3.0-or-later, while this project is MIT — see the license notes at the
+bottom before redistributing a bundle containing it.
+
+### Run automatically in the background
+
+**Recommended — Scheduled Task** (survives crashes *and* full process death,
+relaunching within ~10 minutes without needing a login). Run once in an
+**administrator** PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install-task.ps1
+```
+
+Add ` -Elevated` to also let it type into elevated/admin windows. Remove it with
+`uninstall-task.ps1`.
+
+**Simpler — Startup shortcut** (no admin, but only relaunches at login):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File install-startup.ps1
 ```
 
-Undo that with `uninstall-startup.ps1`. To quit, right-click the tray mic icon →
-**Quit**.
+Undo with `uninstall-startup.ps1`. To quit either way, right-click the tray mic
+icon → **Quit**.
 
 ## Configuration — `config/config.json`
 
@@ -79,6 +119,11 @@ Undo that with `uninstall-startup.ps1`. To quit, right-click the tray mic icon �
 | `beep_feedback` | `true` | Start/stop beeps |
 | `min_record_seconds` | `0.3` | Ignore accidental taps shorter than this |
 | `voice_commands` | see file | Spoken phrase → text mapping |
+| `tts_enabled` | `true` | Read-aloud on/off |
+| `tts_hotkey` | `f10` | Tap to read selection, tap again to stop |
+| `tts_model` | `models/en_US-lessac-medium.onnx` | Piper voice. [Browse voices](https://huggingface.co/rhasspy/piper-voices) |
+| `tts_speed` | `1.0` | `1.2` is faster, `0.9` slower |
+| `tts_max_chars` | `20000` | Safety cap on a single read |
 
 Restart the app after editing config.
 
@@ -122,15 +167,19 @@ Whisper raw audio arrays and never decodes files, so nothing is lost.
 ## How it works
 
 ```
-F9 hook -> record (sounddevice) -> faster-whisper (local)
-        -> format (spoken punctuation, spacing, caps)
-        -> inject (clipboard paste, or keystrokes in terminals)
+Dictate:    F9 hook  -> record (sounddevice) -> faster-whisper (local)
+                     -> format (spoken punctuation, spacing, caps)
+                     -> inject (clipboard paste, or keystrokes in terminals)
+
+Read aloud: F10 hook -> copy selection (Ctrl+C, clipboard restored after)
+                     -> Piper (local) -> play, interruptible
 ```
 
 | File | Role |
 |---|---|
-| `src/main.py` | Hotkey, recording, tray, orchestration |
+| `src/main.py` | Hotkeys, recording, tray, orchestration |
 | `src/postprocess.py` | Spoken punctuation, spacing, capitalization |
+| `src/tts.py` | Selection capture and local speech synthesis |
 | `src/audio_mute.py` | Mute/restore speakers via Windows Core Audio |
 | `src/supervisor.py` | Relaunches the app if it crashes |
 | `src/av_shim.py` | PyAV stub for Smart App Control |
@@ -140,9 +189,12 @@ F9 hook -> record (sounddevice) -> faster-whisper (local)
 
 Audio is captured, transcribed in-process, and discarded. Nothing is uploaded
 and no audio is written to disk. The app uses a global keyboard hook — required
-for a system-wide push-to-talk key — but only to detect the hotkey and type your
-dictated text. **No keystrokes are logged.** See
-[SECURITY.md](SECURITY.md).
+for a system-wide push-to-talk key — but only to detect the hotkeys and type your
+dictated text. **No keystrokes are logged.**
+
+Read-aloud sends `Ctrl+C` to copy whatever you have selected, speaks it locally,
+and restores your previous clipboard. The selected text is never written to disk
+or transmitted. See [SECURITY.md](SECURITY.md).
 
 ## Status
 
@@ -176,3 +228,15 @@ installed from PyPI rather than bundled:
 
 The Whisper models are released by OpenAI under MIT; the CTranslate2 conversions
 are distributed by SYSTRAN.
+
+#### Piper is optional, and it is GPL
+
+Read-aloud defaults to the **built-in Windows SAPI voices**, which add no extra
+license obligations. That is why nothing in `requirements.txt` pulls in Piper.
+
+If you opt in to the neural voice, note that
+[piper-tts](https://github.com/rhasspy/piper) is **GPL-3.0-or-later** (it bundles
+espeak-ng). Installing it yourself for personal use is fine. But if you
+redistribute a bundle that combines this project with Piper, the combined work
+falls under GPL-3.0 — you cannot ship that combination as MIT. Keeping Piper an
+opt-in install is what keeps this project's own MIT licensing clean.
