@@ -484,6 +484,8 @@ class App:
         threading.Thread(target=self.worker, daemon=True).start()
         if self.speaker:
             threading.Thread(target=self.tts_worker, daemon=True).start()
+            # Warm the voice model in the background so the first F10 is instant.
+            threading.Thread(target=self.speaker.preload, daemon=True).start()
         try:
             self.icon.run()  # blocks on the main thread until Quit
         finally:

@@ -20,16 +20,15 @@ don't stutter, and both engines poll a stop flag so a second keypress
 interrupts immediately rather than at the end of the current sentence.
 """
 
+import collections
 import os
-import queue
 import threading
 import time
 
 import keyboard
+import numpy as np
 import pyperclip
 import sounddevice as sd
-
-_SENTINEL = object()
 
 # SAPI SpeechVoiceSpeakFlags
 _SVSF_ASYNC = 1
@@ -91,7 +90,10 @@ class Speaker:
         self._load_lock = threading.Lock()
         self._stop = threading.Event()
         self._speaking = threading.Event()
-        self._sapi = None
+        # SAPI objects are apartment-threaded: one per thread, never shared.
+        # A single cached instance reused from another thread marshals across
+        # apartments and blocks, which made stop() take seconds instead of ms.
+        self._tls = threading.local()
         self.engine = self._resolve_engine(engine)
         self._log(f"tts engine: {self.engine}")
 
@@ -119,18 +121,32 @@ class Speaker:
     def speaking(self):
         return self._speaking.is_set()
 
+    def preload(self):
+        """Warm the engine so the first hotkey press isn't slow.
+
+        Loading the Piper model takes ~1.7s; doing it lazily meant the first
+        read-aloud of the session stalled before any sound. Call this on a
+        background thread at startup instead.
+        """
+        try:
+            if self.engine == "piper":
+                self._load_piper()
+        except Exception as e:
+            self._log(f"tts preload failed: {e}")
+
     def stop(self):
-        """Interrupt playback. Safe from a keyboard hook -- never blocks."""
+        """Interrupt playback. Safe from a keyboard hook -- never blocks.
+
+        Note for the Windows engine: we deliberately do NOT touch the SAPI
+        object here. It lives in the speaking thread's COM apartment, and
+        calling across threads marshals badly -- it blocked instead of purging,
+        so playback ran on for seconds after stop(). Setting the flag is enough;
+        the speak loop polls it and purges on its own thread within ~50ms.
+        """
         self._stop.set()
         if self.engine == "piper":
             try:
                 sd.stop()
-            except Exception:
-                pass
-        else:
-            try:
-                if self._sapi is not None:
-                    self._sapi.Speak("", _SVSF_PURGE)
             except Exception:
                 pass
 
@@ -164,27 +180,52 @@ class Speaker:
 
     # ---------- Windows SAPI ----------
 
-    def _speak_windows(self, text):
-        import pythoncom
-        import win32com.client
+    def _sapi_for_this_thread(self):
+        """Get (or create) this thread's own SAPI voice."""
+        sapi = getattr(self._tls, "sapi", None)
+        if sapi is None:
+            import pythoncom
+            import win32com.client
 
-        pythoncom.CoInitialize()
-        if self._sapi is None:
-            self._sapi = win32com.client.Dispatch("SAPI.SpVoice")
+            pythoncom.CoInitialize()
+            sapi = win32com.client.Dispatch("SAPI.SpVoice")
+            self._tls.sapi = sapi
+        return sapi
+
+    def _speak_windows(self, text):
+        sapi = self._sapi_for_this_thread()
         # SAPI rate is -10..10; map speed 1.0 -> 0, 1.2 -> +1, 0.8 -> -1.
         try:
             rate = int(round((float(self.speed) - 1.0) * 5))
-            self._sapi.Rate = max(-10, min(10, rate))
+            sapi.Rate = max(-10, min(10, rate))
         except Exception:
             pass
 
-        self._sapi.Speak(text, _SVSF_ASYNC)
-        while not self._sapi.WaitUntilDone(100):
+        sapi.Speak(text, _SVSF_ASYNC)
+        # Short poll interval so a stop request is honoured promptly.
+        while not sapi.WaitUntilDone(50):
             if self._stop.is_set():
+                # Measured: SAPI's purge blocks ~1s flushing the audio device,
+                # but setting Volume to 0 is instantaneous. Mute first so the
+                # user hears silence immediately, and report ourselves as no
+                # longer speaking before the slow purge, so a quick second
+                # press starts a new read instead of being swallowed.
+                saved_volume = None
                 try:
-                    self._sapi.Speak("", _SVSF_PURGE)
+                    saved_volume = sapi.Volume
+                    sapi.Volume = 0
                 except Exception:
                     pass
+                self._speaking.clear()
+                try:
+                    sapi.Speak("", _SVSF_PURGE)
+                except Exception:
+                    pass
+                if saved_volume is not None:
+                    try:
+                        sapi.Volume = saved_volume
+                    except Exception:
+                        pass
                 return "interrupted"
         return "complete"
 
@@ -211,51 +252,89 @@ class Speaker:
             pass
         return None
 
-    def _play_interruptible(self, audio, sample_rate):
-        """Play one chunk, returning False if stop() was called."""
-        sd.play(audio, samplerate=sample_rate)
-        while True:
-            if self._stop.is_set():
-                try:
-                    sd.stop()
-                except Exception:
-                    pass
-                return False
-            try:
-                stream = sd.get_stream()
-                if stream is None or not stream.active:
-                    return True
-            except Exception:
-                return True
-            time.sleep(0.03)
-
     def _speak_piper(self, text):
+        """Play through ONE continuous output stream.
+
+        An earlier version called sd.play() per sentence, which opened and tore
+        down a stream for every chunk. sd.play() also cuts off whatever is
+        already playing, and the poll loop could return before a chunk had
+        finished -- so sentences were clipped and gapped ("scratched CD").
+
+        Here a single OutputStream pulls from a shared buffer that the
+        synthesis thread fills. Piper runs ~20x faster than realtime, so the
+        producer stays far ahead and playback is continuous.
+        """
         voice = self._load_piper()
         cfg = self._piper_config()
-        chunks = queue.Queue(maxsize=8)
+        sample_rate = int(getattr(voice.config, "sample_rate", 22050) or 22050)
+
+        buf = collections.deque()
+        buf_lock = threading.Lock()
+        produced_all = threading.Event()
+        finished = threading.Event()
+        counts = {"chunks": 0}
 
         def produce():
-            # Synthesize ahead of playback so sentences run together smoothly.
             try:
                 gen = voice.synthesize(text, cfg) if cfg else voice.synthesize(text)
                 for chunk in gen:
                     if self._stop.is_set():
                         break
-                    chunks.put((chunk.audio_float_array, chunk.sample_rate))
+                    audio = np.asarray(chunk.audio_float_array, dtype=np.float32)
+                    with buf_lock:
+                        buf.append(audio)
+                    counts["chunks"] += 1
             except Exception as e:
                 self._log(f"tts synth error: {e}")
             finally:
-                chunks.put(_SENTINEL)
+                produced_all.set()
 
         threading.Thread(target=produce, daemon=True).start()
 
-        played = 0
-        while not self._stop.is_set():
-            item = chunks.get()
-            if item is _SENTINEL:
+        def callback(outdata, frames, _time_info, _status):
+            if self._stop.is_set():
+                outdata[:] = 0
+                raise sd.CallbackStop
+            filled = 0
+            with buf_lock:
+                while filled < frames and buf:
+                    head = buf[0]
+                    take = min(len(head), frames - filled)
+                    outdata[filled:filled + take, 0] = head[:take]
+                    filled += take
+                    if take == len(head):
+                        buf.popleft()
+                    else:
+                        buf[0] = head[take:]
+            if filled < frames:
+                outdata[filled:, 0] = 0.0
+                # Only end the stream once synthesis is done AND the buffer has
+                # drained -- otherwise a brief producer lag would end playback.
+                if produced_all.is_set():
+                    raise sd.CallbackStop
+
+        # Small cushion before opening the stream so it never starts on empty.
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not produced_all.is_set():
+            if self._stop.is_set():
+                return "stopped before playback"
+            with buf_lock:
+                buffered = sum(len(a) for a in buf)
+            if buffered >= sample_rate * 0.3:
                 break
-            audio, sample_rate = item
-            if not self._play_interruptible(audio, sample_rate):
-                break
-            played += 1
-        return f"{played} chunks"
+            time.sleep(0.01)
+
+        stream = sd.OutputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="float32",
+            callback=callback,
+            finished_callback=finished.set,
+        )
+        with stream:
+            while not finished.is_set():
+                if self._stop.is_set():
+                    break
+                time.sleep(0.02)
+
+        return f"{counts['chunks']} chunks"
