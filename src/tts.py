@@ -35,12 +35,16 @@ _SVSF_ASYNC = 1
 _SVSF_PURGE = 2
 
 
-def get_selected_text(timeout_s=0.6):
+def get_selected_text(timeout_s=0.6, copy_hotkey="ctrl+c"):
     """Copy the current selection without permanently disturbing the clipboard.
 
     Clears the clipboard first so an empty result reliably means "nothing was
     selected" rather than "the selection happened to match what was already
     there". The previous contents are restored on a short delay.
+
+    copy_hotkey matters: in terminals Ctrl+C is the interrupt/break signal, not
+    copy, so sending it there fails to copy AND can kill a running command.
+    Callers pass "ctrl+shift+c" for terminals.
     """
     saved = None
     try:
@@ -53,7 +57,7 @@ def get_selected_text(timeout_s=0.6):
     except Exception:
         pass
 
-    keyboard.send("ctrl+c")
+    keyboard.send(copy_hotkey)
 
     text = ""
     deadline = time.time() + timeout_s

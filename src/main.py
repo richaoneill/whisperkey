@@ -408,8 +408,19 @@ class App:
                 self._tts_requested.set()
 
         try:
-            keyboard.on_press_key(key, on_tts)
-            log(f"tts hotkey '{key}' installed (tap to read, tap again to stop)")
+            # Suppress the key so it never reaches the focused app: F10 opens
+            # the menu bar in many Windows programs, and a stray keypress can
+            # clear a terminal's text selection before we manage to copy it.
+            try:
+                keyboard.on_press_key(key, on_tts, suppress=True)
+                suppressed = True
+            except TypeError:
+                keyboard.on_press_key(key, on_tts)
+                suppressed = False
+            log(
+                f"tts hotkey '{key}' installed (suppressed={suppressed}); "
+                "tap to read, tap again to stop"
+            )
             return True
         except Exception:
             log("tts hook install failed:\n" + traceback.format_exc())
@@ -426,11 +437,23 @@ class App:
             if self.stop_event.is_set():
                 break
             try:
-                text = get_selected_text()
+                # Terminals treat Ctrl+C as the interrupt signal rather than
+                # copy: it fails to copy AND can kill a running command. Use
+                # the terminal copy shortcut there instead.
+                proc = foreground_process_name()
+                is_terminal = proc in [
+                    p.lower() for p in self.cfg.get("terminal_processes", [])
+                ]
+                combo = (
+                    self.cfg.get("tts_terminal_copy_hotkey", "ctrl+shift+c")
+                    if is_terminal
+                    else self.cfg.get("tts_copy_hotkey", "ctrl+c")
+                )
+                text = get_selected_text(copy_hotkey=combo)
                 if not text:
                     # Low tone: nothing was selected.
                     beep(300, 120, self.cfg.get("beep_feedback", True))
-                    log("tts: nothing selected")
+                    log(f"tts: nothing selected (app={proc or '?'}, copy={combo})")
                     continue
                 self.set_icon_state("speak")
                 self.speaker.speak(text, self.cfg.get("tts_max_chars", 20000))

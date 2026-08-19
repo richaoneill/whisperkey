@@ -11,6 +11,8 @@
   "tts_enabled": true,
   "tts_hotkey": "f10",
   "tts_engine": "auto",
+  "tts_copy_hotkey": "ctrl+c",
+  "tts_terminal_copy_hotkey": "ctrl+shift+c",
   "tts_model": "models/en_US-lessac-medium.onnx",
   "tts_speed": 1.0,
   "tts_max_chars": 20000,
