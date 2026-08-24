@@ -17,6 +17,7 @@ Right-click it to Quit.
 
 import json
 import os
+import queue
 import sys
 import time
 import threading
@@ -243,6 +244,11 @@ class App:
         self._recording_now = False
         self._state_changed = threading.Event()
         self._hooked = False
+        # Transcription runs on its own thread. Doing it inline blocked the
+        # hotkey worker for the whole decode, so pressing F9 again during a
+        # long transcription was silently swallowed: no beep, no recording,
+        # no log entry.
+        self._stt_queue = queue.Queue()
         self.muter = None
         if cfg.get("mute_audio_while_recording", False):
             try:
@@ -306,6 +312,7 @@ class App:
         self.stop_event.set()
         self._state_changed.set()  # wake the worker so it can exit
         self._tts_requested.set()
+        self._stt_queue.put(None)
         if self.speaker:
             self.speaker.stop()
         self.icon.stop()
@@ -331,23 +338,14 @@ class App:
 
         duration = len(audio) / self.cfg["sample_rate"] if len(audio) else 0
         if duration < self.cfg.get("min_record_seconds", 0.3):
+            log(f"utterance ignored: {duration:.2f}s is below min_record_seconds")
             return
 
-        t0 = time.time()
-        segments, _ = self.model.transcribe(
-            audio, language="en", beam_size=1, vad_filter=True
-        )
-        text = "".join(seg.text for seg in segments).strip()
-        stt_ms = (time.time() - t0) * 1000
-        text = format_text(
-            text,
-            self.cfg.get("voice_commands"),
-            self.cfg.get("smart_formatting", True),
-        )
-        # Perf trail: lets us spot real-world slowdowns instead of guessing.
-        log(f"utterance: {duration:.1f}s audio -> {stt_ms:.0f}ms stt, {len(text)} chars")
-        if text:
-            inject_text(text, self.cfg)
+        # Hand off and return immediately so the next press is never missed.
+        self._stt_queue.put((audio, duration))
+        backlog = self._stt_queue.qsize()
+        if backlog > 1:
+            log(f"transcription queued, backlog {backlog}")
 
     def _recover(self):
         """Return to a known-good idle state after an error."""
@@ -462,6 +460,38 @@ class App:
             finally:
                 self.set_icon_state("idle")
 
+    def stt_worker(self):
+        """Transcribe queued audio off the hotkey thread, in order."""
+        while not self.stop_event.is_set():
+            try:
+                item = self._stt_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            audio, duration = item
+            try:
+                t0 = time.time()
+                segments, _ = self.model.transcribe(
+                    audio, language="en", beam_size=1, vad_filter=True
+                )
+                text = "".join(seg.text for seg in segments).strip()
+                stt_ms = (time.time() - t0) * 1000
+                text = format_text(
+                    text,
+                    self.cfg.get("voice_commands"),
+                    self.cfg.get("smart_formatting", True),
+                )
+                # Perf trail: spot real slowdowns instead of guessing.
+                log(
+                    f"utterance: {duration:.1f}s audio -> {stt_ms:.0f}ms stt, "
+                    f"{len(text)} chars"
+                )
+                if text:
+                    inject_text(text, self.cfg)
+            except Exception:
+                log("transcription error:\n" + traceback.format_exc())
+
     def worker(self):
         """React to hotkey transitions. Blocks when idle, so ~0% CPU at rest."""
         if self._hooked:
@@ -505,6 +535,7 @@ class App:
         self.install_hooks()
         self.install_tts_hook()
         threading.Thread(target=self.worker, daemon=True).start()
+        threading.Thread(target=self.stt_worker, daemon=True).start()
         if self.speaker:
             threading.Thread(target=self.tts_worker, daemon=True).start()
             # Warm the voice model in the background so the first F10 is instant.
