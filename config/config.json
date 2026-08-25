@@ -1,5 +1,5 @@
 {
-  "hotkey": "f9",
+  "hotkey": ["f9", "f17"],
   "model_size": "base.en",
   "compute_type": "int8",
   "device": "cpu",
@@ -9,7 +9,7 @@
   "beep_feedback": true,
   "mute_audio_while_recording": true,
   "tts_enabled": true,
-  "tts_hotkey": "f10",
+  "tts_hotkey": ["f10", "f18"],
   "tts_engine": "auto",
   "tts_copy_hotkey": "ctrl+c",
   "tts_terminal_copy_hotkey": "ctrl+shift+c",

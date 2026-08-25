@@ -104,6 +104,19 @@ REC_COLOR = (220, 40, 40, 255)     # red
 SPEAK_COLOR = (34, 197, 94, 255)   # green — reading selection aloud
 
 
+def as_key_list(value):
+    """Normalise a hotkey setting to a list of key names.
+
+    A key can report a different name depending on the keyboard. This laptop's
+    built-in keyboard sends f17 (scan code 104) for the key labelled F9, while
+    the external keyboard sends a real f9. Listing both means either keyboard
+    works without the user having to think about which one is attached.
+    """
+    if isinstance(value, str):
+        return [value]
+    return [str(v) for v in value]
+
+
 def load_config():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -286,11 +299,16 @@ class App:
             make_icon_image(IDLE_COLOR),
             "WhisperKey",
             menu=pystray.Menu(
-                pystray.MenuItem(lambda i: f"Dictate: {self.cfg['hotkey']}", None, enabled=False),
+                pystray.MenuItem(
+                    lambda i: "Dictate: " + " / ".join(as_key_list(self.cfg["hotkey"])),
+                    None,
+                    enabled=False,
+                ),
                 pystray.MenuItem(
                     lambda i: (
-                        f"Read aloud: {self.cfg.get('tts_hotkey', 'f10')}"
-                        f" ({self.speaker.engine})"
+                        "Read aloud: "
+                        + " / ".join(as_key_list(self.cfg.get("tts_hotkey", "f10")))
+                        + f" ({self.speaker.engine})"
                         if self.speaker else "Read aloud: off"
                     ),
                     None,
@@ -363,8 +381,8 @@ class App:
         Avoids polling, which previously woke 50x/second forever and burned
         hours of CPU. Handlers do nothing but set a flag -- never blocking work.
         """
-        key = self.cfg["hotkey"]
-        if "+" in key:
+        keys = as_key_list(self.cfg["hotkey"])
+        if any("+" in k for k in keys):
             return False  # combos fall back to polling
 
         def on_press(_e):
@@ -378,10 +396,11 @@ class App:
                 self._state_changed.set()
 
         try:
-            keyboard.on_press_key(key, on_press)
-            keyboard.on_release_key(key, on_release)
+            for k in keys:
+                keyboard.on_press_key(k, on_press)
+                keyboard.on_release_key(k, on_release)
             self._hooked = True
-            log(f"hotkey '{key}' installed event-driven (no polling)")
+            log(f"dictation hotkeys {keys} installed event-driven (no polling)")
             return True
         except Exception:
             log("hook install failed, falling back to polling:\n" + traceback.format_exc())
@@ -391,9 +410,9 @@ class App:
         """Read-aloud hotkey: tap to read the selection, tap again to stop."""
         if not self.speaker:
             return False
-        key = self.cfg.get("tts_hotkey", "f10")
-        if "+" in key:
-            log(f"tts hotkey '{key}' is a combo; only single keys are supported")
+        keys = as_key_list(self.cfg.get("tts_hotkey", "f10"))
+        if any("+" in k for k in keys):
+            log(f"tts hotkeys {keys} include a combo; only single keys are supported")
             return False
 
         def on_tts(_e):
@@ -410,13 +429,16 @@ class App:
             # the menu bar in many Windows programs, and a stray keypress can
             # clear a terminal's text selection before we manage to copy it.
             try:
-                keyboard.on_press_key(key, on_tts, suppress=True)
-                suppressed = True
+                want = self.cfg.get("tts_hotkey_suppress", True)
+                for k in keys:
+                    keyboard.on_press_key(k, on_tts, suppress=want)
+                suppressed = want
             except TypeError:
-                keyboard.on_press_key(key, on_tts)
+                for k in keys:
+                    keyboard.on_press_key(k, on_tts)
                 suppressed = False
             log(
-                f"tts hotkey '{key}' installed (suppressed={suppressed}); "
+                f"tts hotkeys {keys} installed (suppressed={suppressed}); "
                 "tap to read, tap again to stop"
             )
             return True
@@ -459,6 +481,36 @@ class App:
                 log("tts worker error:\n" + traceback.format_exc())
             finally:
                 self.set_icon_state("idle")
+
+    def keepwarm(self):
+        """Keep hot code resident so the hotkey is never missed after idling.
+
+        Windows trims an idle process aggressively: after a night unused this
+        app had been cut from a 500 MB peak down to an 8 MB working set. A
+        low-level keyboard hook whose callback overruns LowLevelHooksTimeout
+        (about 300 ms) has its event DROPPED silently, and faulting that much
+        code back off disk easily overruns it. The result was hotkeys that did
+        nothing at all, with no error and no log line, until the process had
+        paged back in.
+
+        Touching these paths on a timer keeps them warm, and the periodic
+        heartbeat means the log can prove whether the app was healthy.
+        """
+        interval = self.cfg.get("keepwarm_seconds", 60)
+        heartbeat_every = self.cfg.get("heartbeat_minutes", 30)
+        beats = 0
+        while not self.stop_event.wait(interval):
+            try:
+                get_icon_image("idle")
+                get_icon_image("rec")
+                foreground_process_name()
+                format_text("warm up", None, False)
+                beats += 1
+                if heartbeat_every and (beats * interval) >= heartbeat_every * 60:
+                    beats = 0
+                    log(f"heartbeat: alive, queue={self._stt_queue.qsize()}")
+            except Exception:
+                pass
 
     def stt_worker(self):
         """Transcribe queued audio off the hotkey thread, in order."""
@@ -515,11 +567,11 @@ class App:
             return
 
         # Fallback: polling (used for combo hotkeys).
-        hotkey = self.cfg["hotkey"]
+        keys = as_key_list(self.cfg["hotkey"])
         was_pressed = False
         while not self.stop_event.is_set():
             try:
-                pressed = keyboard.is_pressed(hotkey)
+                pressed = any(keyboard.is_pressed(k) for k in keys)
                 if pressed and not was_pressed:
                     self._on_press()
                 elif not pressed and was_pressed:
@@ -536,6 +588,7 @@ class App:
         self.install_tts_hook()
         threading.Thread(target=self.worker, daemon=True).start()
         threading.Thread(target=self.stt_worker, daemon=True).start()
+        threading.Thread(target=self.keepwarm, daemon=True).start()
         if self.speaker:
             threading.Thread(target=self.tts_worker, daemon=True).start()
             # Warm the voice model in the background so the first F10 is instant.
