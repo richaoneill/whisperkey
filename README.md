@@ -113,6 +113,7 @@ icon → **Quit**.
 | `model_size` | `base.en` | `tiny.en` (fastest) → `small.en` / `medium.en` (more accurate, slower) |
 | `compute_type` | `int8` | Quantization. `int8` is the fast CPU default. |
 | `device` | `cpu` | Set to `cuda` if you have an NVIDIA GPU. |
+| `input_device` | system default | Preferred microphone(s) by name, e.g. `["Yeti"]`. First match wins; if none is connected it falls back to the Windows default. |
 | `injection_mode` | `auto` | `auto`, `paste`, or `keystroke` |
 | `restore_clipboard` | `true` | Put your previous clipboard back after pasting |
 | `mute_audio_while_recording` | `true` | Mute speakers while you speak |
@@ -151,7 +152,9 @@ window. Run `run.bat` as administrator to dictate into admin apps.
 
 **Wrong or empty text.** Check `data/whisperkey.log`. If the logged text is
 correct but nothing appeared, it's an injection issue; if the text is wrong,
-it's a mic issue (the app uses your Windows *default* input device).
+it's a mic issue. Right-click the tray icon to see which mic is in use, and set
+`input_device` to pick a specific one. Without it the app uses whatever Windows
+has as the default input, which may be a webcam or laptop mic.
 
 **It stopped working.** Check `data/whisperkey.log` for a crash entry and
 `data/faulthandler.log` for native crashes. The supervisor should relaunch it

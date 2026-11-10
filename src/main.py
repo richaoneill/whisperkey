@@ -172,27 +172,83 @@ def get_icon_image(state):
     return _ICON_CACHE[state]
 
 
+def resolve_input_device(preferences):
+    """Pick the microphone: first preferred name found, else the system default.
+
+    Without this the app silently used whatever Windows had as the default
+    input, which on this machine was the webcam mic rather than the Yeti, and
+    the default shifts as devices are docked or unplugged. Matching by name
+    survives PortAudio renumbering devices. Within a match, prefer the same
+    host API as the default (MME here), since that path resamples to 16 kHz.
+
+    Returns (device_index_or_None, display_name). None means system default.
+    """
+    prefs = as_key_list(preferences) if preferences else []
+    try:
+        devices = sd.query_devices()
+        default_idx = sd.default.device[0]
+        has_default = default_idx is not None and default_idx >= 0
+        default_api = devices[default_idx]["hostapi"] if has_default else None
+    except Exception:
+        return None, "system default"
+
+    for want in prefs:
+        needle = want.lower()
+        matches = [
+            i for i, d in enumerate(devices)
+            if d["max_input_channels"] > 0 and needle in d["name"].lower()
+        ]
+        if not matches:
+            continue
+        same_api = [i for i in matches if devices[i]["hostapi"] == default_api]
+        idx = (same_api or matches)[0]
+        return idx, devices[idx]["name"]
+
+    if has_default:
+        return None, devices[default_idx]["name"] + " (system default)"
+    return None, "system default"
+
+
 class Recorder:
-    def __init__(self, sample_rate):
+    def __init__(self, sample_rate, preferences=None):
         self.sample_rate = sample_rate
+        self.preferences = preferences
         self.frames = []
         self.stream = None
         self.recording = False
+        self.device_name = resolve_input_device(preferences)[1]
 
     def _callback(self, indata, frames, time_info, status):
         if self.recording:
             self.frames.append(indata.copy())
 
-    def start(self):
-        self.frames = []
-        self.recording = True
-        self.stream = sd.InputStream(
+    def _open(self, device):
+        return sd.InputStream(
+            device=device,
             samplerate=self.sample_rate,
             channels=1,
             dtype="float32",
             callback=self._callback,
         )
+
+    def start(self):
+        self.frames = []
+        self.recording = True
+        # Resolved on every press so the right mic is used after docking or
+        # unplugging, without restarting the app.
+        idx, name = resolve_input_device(self.preferences)
+        try:
+            self.stream = self._open(idx)
+        except Exception:
+            if idx is None:
+                raise
+            log(f"mic '{name}' failed to open; falling back to system default")
+            idx, name = None, "system default (fallback)"
+            self.stream = self._open(None)
         self.stream.start()
+        if name != self.device_name:
+            log(f"microphone: {name}")
+            self.device_name = name
 
     def stop(self):
         self.recording = False
@@ -248,7 +304,8 @@ class App:
     def __init__(self, cfg, model):
         self.cfg = cfg
         self.model = model
-        self.recorder = Recorder(cfg["sample_rate"])
+        self.recorder = Recorder(cfg["sample_rate"], cfg.get("input_device"))
+        log(f"microphone: {self.recorder.device_name}")
         self.stop_event = threading.Event()
         # Event-driven hotkey state. Hooks only flip a flag and signal; all real
         # work happens on the worker thread so the keyboard listener is never
@@ -315,6 +372,7 @@ class App:
                     enabled=False,
                 ),
                 pystray.MenuItem(lambda i: f"Model: {self.cfg['model_size']}", None, enabled=False),
+                pystray.MenuItem(lambda i: f"Mic: {self.recorder.device_name}", None, enabled=False),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Quit", self.on_quit),
             ),
