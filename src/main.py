@@ -41,6 +41,7 @@ import pystray
 from PIL import Image, ImageDraw
 
 from postprocess import format_text
+import audio_devices
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "config.json")
 LOG_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "whisperkey.log")
@@ -234,17 +235,23 @@ class Recorder:
     def start(self):
         self.frames = []
         self.recording = True
-        # Resolved on every press so the right mic is used after docking or
-        # unplugging, without restarting the app.
-        idx, name = resolve_input_device(self.preferences)
-        try:
-            self.stream = self._open(idx)
-        except Exception:
-            if idx is None:
-                raise
-            log(f"mic '{name}' failed to open; falling back to system default")
-            idx, name = None, "system default (fallback)"
-            self.stream = self._open(None)
+        # Normally a no-op (0.1 ms). Only if Windows reported a mic change that
+        # the background refresher hasn't picked up yet does this re-read the
+        # device list (~50 ms, once).
+        audio_devices.refresh_if_dirty()
+        # Resolve + open under the PortAudio lock so a background refresh can
+        # never re-initialise PortAudio mid-open.
+        with audio_devices.PA_LOCK:
+            idx, name = resolve_input_device(self.preferences)
+            try:
+                self.stream = self._open(idx)
+            except Exception:
+                if idx is None:
+                    raise
+                log(f"mic '{name}' failed to open; falling back to system default")
+                idx, name = None, "system default (fallback)"
+                self.stream = self._open(None)
+            audio_devices.stream_opened()
         self.stream.start()
         if name != self.device_name:
             log(f"microphone: {name}")
@@ -253,9 +260,12 @@ class Recorder:
     def stop(self):
         self.recording = False
         if self.stream is not None:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
+            try:
+                self.stream.stop()
+                self.stream.close()
+            finally:
+                self.stream = None
+                audio_devices.stream_closed()
         if not self.frames:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(self.frames, axis=0).flatten()
@@ -398,6 +408,10 @@ class App:
         # speakers are about to be muted.
         if self.speaker and self.speaker.speaking:
             self.speaker.stop()
+            # Give playback a moment to release its stream before we open one.
+            deadline = time.time() + 0.3
+            while self.speaker.speaking and time.time() < deadline:
+                time.sleep(0.01)
         # Ding first (so it's audible), then mute output, then start recording.
         beep(880, 80, self.cfg["beep_feedback"])
         if self.muter:
@@ -642,6 +656,7 @@ class App:
             time.sleep(0.03)
 
     def run(self):
+        audio_devices.start_watching(log)
         self.install_hooks()
         self.install_tts_hook()
         threading.Thread(target=self.worker, daemon=True).start()

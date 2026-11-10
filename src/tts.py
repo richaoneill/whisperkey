@@ -30,6 +30,8 @@ import numpy as np
 import pyperclip
 import sounddevice as sd
 
+import audio_devices
+
 # SAPI SpeechVoiceSpeakFlags
 _SVSF_ASYNC = 1
 _SVSF_PURGE = 2
@@ -328,17 +330,24 @@ class Speaker:
                 break
             time.sleep(0.01)
 
-        stream = sd.OutputStream(
-            samplerate=sample_rate,
-            channels=1,
-            dtype="float32",
-            callback=callback,
-            finished_callback=finished.set,
-        )
-        with stream:
-            while not finished.is_set():
-                if self._stop.is_set():
-                    break
-                time.sleep(0.02)
+        # Opened under the PortAudio lock and counted, so a device-list refresh
+        # never re-initialises PortAudio underneath live playback.
+        with audio_devices.PA_LOCK:
+            stream = sd.OutputStream(
+                samplerate=sample_rate,
+                channels=1,
+                dtype="float32",
+                callback=callback,
+                finished_callback=finished.set,
+            )
+            audio_devices.stream_opened()
+        try:
+            with stream:
+                while not finished.is_set():
+                    if self._stop.is_set():
+                        break
+                    time.sleep(0.02)
+        finally:
+            audio_devices.stream_closed()
 
         return f"{counts['chunks']} chunks"

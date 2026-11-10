@@ -113,7 +113,7 @@ icon → **Quit**.
 | `model_size` | `base.en` | `tiny.en` (fastest) → `small.en` / `medium.en` (more accurate, slower) |
 | `compute_type` | `int8` | Quantization. `int8` is the fast CPU default. |
 | `device` | `cpu` | Set to `cuda` if you have an NVIDIA GPU. |
-| `input_device` | system default | Preferred microphone(s) by name, e.g. `["Yeti"]`. First match wins; if none is connected it falls back to the Windows default. |
+| `input_device` | system default | Preferred microphone(s) by name, e.g. `["Yeti"]`. First connected match wins, e.g. `["Yeti", "Jack Mic", "Microphone Array"]`; if none is connected it falls back to the Windows default. Plugging or unplugging a mic is picked up automatically, no restart needed. |
 | `injection_mode` | `auto` | `auto`, `paste`, or `keystroke` |
 | `restore_clipboard` | `true` | Put your previous clipboard back after pasting |
 | `mute_audio_while_recording` | `true` | Mute speakers while you speak |

@@ -4,7 +4,7 @@
   "compute_type": "int8",
   "device": "cpu",
   "sample_rate": 16000,
-  "input_device": ["Yeti"],
+  "input_device": ["Yeti", "Jack Mic", "Microphone Array", "StreamCam"],
   "injection_mode": "auto",
   "restore_clipboard": true,
   "beep_feedback": true,
